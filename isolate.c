@@ -1,12 +1,18 @@
+#define _GNU_SOURCE
+
+#include <sched.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <stdlib.h>
 
 struct params
 {
-    int fd[2];
-    char **argv;
+    int fd[2]; // pipe
+    char **argv;  // params
 };
 
 static void parse_args(int argc, char **argv, struct params *params)
@@ -35,6 +41,35 @@ static void die(const char *fmt, ...)
     exit(1);
 }
 
+void await_setup(int pipe)
+{
+    // We're done once we read something from the pipe.
+    char buf[2];
+    if (read(pipe, buf, 2) != 2)
+        die("Failed to read from pipe: %m\n");
+}
+
+static int cmd_exec(void * arg)
+{
+    // Kill the cmd process if the isolate process dies.
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL))
+        die("cannot PR_SET_PDEATHSIG for child process: %m\n");
+    
+    struct params *params = (struct params*) arg;
+    // Wait for 'setup done' signal from the main process.
+    await_setup(params->fd[0]);
+
+    char **argv = params->argv;
+    char *cmd = argv[0];
+    
+    printf("===========%s============\n", cmd);
+    if (execvp(cmd, argv) == -1)
+        die("Failed to exec %s: %m\n", cmd);
+    
+    die("¯\\_(ツ)_/¯");
+    return 1;
+}
+
 int main(int argc, char const *argv[])
 {
     struct params params;
@@ -44,6 +79,33 @@ int main(int argc, char const *argv[])
     // Create pipe to communicate between main and command process.
     if (pipe(params.fd) < 0)
         die("Failed to create pipe: %m");
+    
+    // Clone command process.
+    int clone_flags =
+        // if the command process exits, it leaves an exit status
+        // so that we can reap it.
+        SIGCHLD |
+        CLONE_NEWUTS;
+    int cmd_pid = clone(
+        cmd_exec, cmd_stack + STACKSIZE, clone_flags, &params
+    );
+    if (cmd_pid < 0)
+        die("Failed to clone: %m\n");
+    
+    // Get the writable end of the pipe.
+    
+    int pipe = params.fd[1];
+
+    // Some namespace setup will take place here ...
+
+    // Signal to the command process we're done with setup.
+    if (write(pipe, "OK", 2) != 2)
+        die("Failed to write to pipe: %m");
+    if (close(pipe))
+        die("Failed to close pipe: %m");
+
+     if (waitpid(cmd_pid, NULL, 0) == -1)
+        die("Failed to wait pid %d: %m\n", cmd_pid);   
 
     return 0;
 }
