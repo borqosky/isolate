@@ -1,8 +1,8 @@
 PROG=isolate
 CFLAGS=-I
 
-compile: %.o: %.c
+%.o: %.c
 	gcc -c -o $@ $<
 
-all: $(PROG).o
+compile: $(PROG).o
 	gcc -o $(PROG) $(PROG).o
