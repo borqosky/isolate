@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <wait.h>
 #include <memory.h>
+#include <sys/mount.h>
+#include <syscall.h>
+#include <errno.h>
 
 struct params
 {
@@ -116,6 +119,37 @@ static void prepare_userns(int pid)
     write_file(path, line);  
 }
 
+static void prepare_mntns(char *rootfs) 
+{
+    const char *mnt = rootfs;
+
+    if (mount(rootfs, mnt, "ext4", MS_BIND, ""))
+        die("Failed to mount %s at %s: %m\n", rootfs, mnt);
+
+    if (chdir(mnt))
+        die("Failed to chdir to rootfs mounted at %s: %m\n", mnt);
+
+    const char *put_old = ".put_old";
+    if (mkdir(put_old, 0777) && errno != EEXIST)
+        die("Failed to mkdir put_old %s: %m\n", put_old);
+
+    if (syscall(SYS_pivot_root, ".", put_old))
+        die("Failed to pivot_root from %s to %s: %m\n", rootfs, put_old);
+
+    if (chdir("/"))
+        die("Failed to chdir to new root: %m\n");
+
+    if (umount2(put_old, MNT_DETACH))
+        die("Failed to umount put_old %s: %m\n", put_old);
+}
+
+int main(int argc, char const *argv[])
+{
+    /* code */
+    return 0
+}
+
+
 int main(int argc, char const *argv[])
 {
     struct params params;
@@ -132,7 +166,8 @@ int main(int argc, char const *argv[])
         // so that we can reap it.
         SIGCHLD |
         CLONE_NEWUTS |
-        CLONE_NEWUSER;
+        CLONE_NEWUSER |
+        CLONE_NEWNS;
     int cmd_pid = clone(
         cmd_exec, cmd_stack + STACKSIZE, clone_flags, &params
     );
