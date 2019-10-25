@@ -13,6 +13,9 @@
 #include <sys/mount.h>
 #include <syscall.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <linux/netlink.h>
+#include "netns.h"
 
 struct params
 {
@@ -60,6 +63,37 @@ static void prepare_procfs()
         die("Failed to mkdir /proc: %m\n");
     if (mount("proc", "/proc", "proc", 0, ""))
         die("Failed to mount proc: %m\n");
+}
+
+static void prepare_netns(int cmd_pid)
+{
+    char *veth = "veth0";
+    char *vpeer = "veth1";
+    char *veth_addr = "10.1.1.1";
+    char *vpeer_addr = "10.1.1.2";
+    char *netmask = "255.255.255.0";
+
+    int sock_fd = create_socket(
+            PF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+
+    create_veth(sock_fd, veth, vpeer);
+
+    if_up(veth, veth_addr, netmask);
+
+    int mynetns = get_netns_fd(getpid());
+    int child_netns = get_netns_fd(cmd_pid);
+
+    move_if_to_pid_netns(sock_fd, vpeer, child_netns);
+
+    if (setns(child_netns, CLONE_NEWNET))
+        die("Failed to setns for command at pid %d: %m\n", cmd_pid);
+
+    if_up(vpeer, vpeer_addr, netmask);
+
+    if (setns(mynetns, CLONE_NEWNET))
+        die("Failed to restore previous net namespace: %m\n");
+
+    close(sock_fd);
 }
 
 static void prepare_mntns(char *rootfs) 
@@ -155,6 +189,14 @@ static void prepare_userns(int pid)
     write_file(path, line);  
 }
 
+int create_socket(int domain, int type, int protocol)
+{
+    int socket_fd = socket(domain, type, protocol);
+    if (socket_fd < 0)
+        die("cannot open socket: %m\n");
+    return socket_fd;
+}
+
 int main(int argc, char const *argv[])
 {
     struct params params;
@@ -173,7 +215,8 @@ int main(int argc, char const *argv[])
         CLONE_NEWUTS |
         CLONE_NEWUSER |
         CLONE_NEWNS |
-        CLONE_NEWPID;
+        CLONE_NEWPID |
+        CLONE_NEWNET;
     int cmd_pid = clone(
         cmd_exec, cmd_stack + STACKSIZE, clone_flags, &params
     );
